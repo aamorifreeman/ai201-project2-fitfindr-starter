@@ -14,3 +14,6 @@ env/
 
 # macOS
 .DS_Store
+
+# Style Profile Memory (stretch feature) -- runtime user state, not codebase
+style_profile.json
