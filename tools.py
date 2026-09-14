@@ -10,6 +10,7 @@ Tools:
     create_fit_card(outfit, new_item)               -> str
 """
 
+import json
 import os
 import re
 
@@ -112,11 +113,16 @@ def search_listings(
         candidates.append(listing)
 
     query_tokens = _tokenize(description)
+    # Require at least 2 overlapping keywords for multi-word queries -- a single
+    # shared word (e.g. "vintage" alone) is too weak a signal and was pulling in
+    # unrelated categories (a belt, khaki trousers) for a query like
+    # "vintage graphic tee." Single-word queries still only need 1 match.
+    min_score = 1 if len(query_tokens) <= 1 else 2
     scored = []
     for listing in candidates:
         listing_tokens = _tokenize(_listing_searchable_text(listing))
         score = len(query_tokens & listing_tokens)
-        if score > 0:
+        if score >= min_score:
             scored.append((score, listing))
 
     scored.sort(key=lambda pair: (-pair[0], pair[1]["price"]))
@@ -135,7 +141,17 @@ def _format_wardrobe(wardrobe: dict) -> str:
     return "\n".join(lines)
 
 
-def suggest_outfit(new_item: dict, wardrobe: dict) -> str:
+def _format_trends(trending_styles: list[dict]) -> str:
+    return "; ".join(
+        f"{t['style_tag']} (trend score {t['trend_score']:.2f})" for t in trending_styles
+    )
+
+
+def suggest_outfit(
+    new_item: dict,
+    wardrobe: dict,
+    trending_styles: list[dict] | None = None,
+) -> str:
     """
     Given a thrifted item and the user's wardrobe, suggest 1-2 complete outfits.
 
@@ -143,6 +159,11 @@ def suggest_outfit(new_item: dict, wardrobe: dict) -> str:
         new_item: A listing dict (the item the user is considering buying).
         wardrobe: A wardrobe dict with an 'items' key containing a list of
                   wardrobe item dicts. May be empty -- handled gracefully.
+        trending_styles: Optional list of trend dicts from get_trending_styles()
+                  (stretch feature). When provided and non-empty, the prompt asks
+                  the LLM to lean into a trending style tag if it's a natural fit
+                  for the item -- when omitted, behavior is identical to the
+                  required (non-stretch) version of this tool.
 
     Returns:
         A non-empty string with outfit suggestions.
@@ -156,10 +177,19 @@ def suggest_outfit(new_item: dict, wardrobe: dict) -> str:
         f"style tags: {', '.join(new_item.get('style_tags', []))})"
     )
 
+    trend_line = ""
+    if trending_styles:
+        trend_line = (
+            f"\nCurrently trending styles (from a resale-platform trend snapshot): "
+            f"{_format_trends(trending_styles)}. If one of these is a natural fit for "
+            "this item, lean into it and mention the vibe -- don't force it if it isn't."
+        )
+
     if not items:
         prompt = (
             "A user is considering buying this secondhand item:\n"
-            f"{item_desc}\n\n"
+            f"{item_desc}\n"
+            f"{trend_line}\n\n"
             "They have not entered a wardrobe yet. Give general styling advice: "
             "what kinds of pieces would pair well with this item, and what overall "
             "vibe or occasions it suits. Keep it to 2-4 sentences, casual tone."
@@ -168,7 +198,8 @@ def suggest_outfit(new_item: dict, wardrobe: dict) -> str:
         wardrobe_text = _format_wardrobe(wardrobe)
         prompt = (
             "A user is considering buying this secondhand item:\n"
-            f"{item_desc}\n\n"
+            f"{item_desc}\n"
+            f"{trend_line}\n\n"
             "Here is their current wardrobe:\n"
             f"{wardrobe_text}\n\n"
             "Suggest 1-2 complete outfit combinations that pair the new item with "
@@ -243,3 +274,101 @@ def create_fit_card(outfit: str, new_item: dict) -> str:
             f"just copped this {new_item['title'].lower()} for ${new_item['price']:.2f} "
             f"off {new_item['platform']} -- full fit details coming soon"
         )
+
+
+# -- Tool 4 (stretch): estimate_fair_price ----------------------------------------
+
+def estimate_fair_price(item: dict) -> str:
+    """
+    Estimate whether an item's price is fair, relative to comparable listings
+    in the dataset (Price Comparison stretch feature).
+
+    Args:
+        item: A listing dict, as returned by search_listings().
+
+    Returns:
+        A str verdict with reasoning: how many comparables were found, their
+        average price, and whether the item looks like a good deal, fair, or
+        priced high relative to that group. If fewer than 2 comparables exist
+        even after broadening from "same category + shared style tag" to
+        "same category" alone, returns a string saying there isn't enough
+        data to compare -- never raises.
+    """
+    listings = load_listings()
+    item_tags = set(item.get("style_tags", []) or [])
+
+    same_category = [
+        listing for listing in listings
+        if listing["category"] == item["category"] and listing["id"] != item["id"]
+    ]
+    comparables = [
+        listing for listing in same_category
+        if item_tags & set(listing.get("style_tags", []) or [])
+    ]
+    comparison_basis = "category and style"
+
+    if len(comparables) < 2:
+        comparables = same_category
+        comparison_basis = "category only -- not enough style-tag overlap for a tighter comparison"
+
+    if len(comparables) < 2:
+        return (
+            f"Not enough comparable listings in the dataset to assess whether "
+            f"${item['price']:.2f} for {item['title']} is a fair price."
+        )
+
+    avg_price = sum(listing["price"] for listing in comparables) / len(comparables)
+    diff_pct = (item["price"] - avg_price) / avg_price
+
+    if diff_pct <= -0.15:
+        verdict = "a good deal"
+    elif diff_pct >= 0.15:
+        verdict = "priced high"
+    else:
+        verdict = "fairly priced"
+
+    return (
+        f"${item['price']:.2f} looks like {verdict} for {item['title']}. "
+        f"Based on {len(comparables)} comparable listings ({comparison_basis}), "
+        f"the average price is ${avg_price:.2f} "
+        f"({diff_pct:+.0%} vs. this item)."
+    )
+
+
+# -- Tool 5 (stretch): get_trending_styles ----------------------------------------
+
+_TRENDS_PATH = os.path.join(os.path.dirname(__file__), "data", "trends.json")
+
+
+def _load_trends() -> list[dict]:
+    with open(_TRENDS_PATH, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def get_trending_styles(size: str | None = None) -> list[dict]:
+    """
+    Look up currently "trending" style tags relevant to a given size
+    (Trend Awareness stretch feature). Backed by a small mock dataset
+    (data/trends.json) representing a snapshot of a resale platform's
+    trend data -- see README for why this is mock rather than live data.
+
+    Args:
+        size: The size the user searched for, or None to skip size filtering.
+
+    Returns:
+        A list[dict] (style_tag, trend_score, note), sorted by trend_score
+        descending, capped to the top 5. Never raises -- trends with no size
+        restriction always apply, so the list is empty only if the trend
+        dataset itself is empty.
+    """
+    trends = _load_trends()
+
+    if size is not None:
+        query_tokens = _size_tokens(size)
+        trends = [
+            t for t in trends
+            if not t.get("size_ranges") or (set(t["size_ranges"]) & query_tokens)
+        ]
+
+    trends = sorted(trends, key=lambda t: -t["trend_score"])
+    return trends[:5]

@@ -1,0 +1,10 @@
+[
+  {"style_tag": "y2k", "trend_score": 0.93, "size_ranges": ["xs", "s", "m"], "note": "Butterfly clips, baby tees, and low-rise are back across resale platforms this season."},
+  {"style_tag": "cottagecore", "trend_score": 0.81, "size_ranges": ["s", "m", "l"], "note": "Flowy midi skirts and prairie tops trending in vintage-focused resale communities."},
+  {"style_tag": "streetwear", "trend_score": 0.88, "size_ranges": [], "note": "Oversized silhouettes and chunky sneakers trending across nearly every size range."},
+  {"style_tag": "grunge", "trend_score": 0.76, "size_ranges": ["xs", "s", "m", "l"], "note": "Combat boots and layered denim seeing a resurgence, especially paired with mesh."},
+  {"style_tag": "minimal", "trend_score": 0.70, "size_ranges": ["s", "m", "l"], "note": "Clean basics in neutral tones staying steady as a year-round resale favorite."},
+  {"style_tag": "vintage", "trend_score": 0.85, "size_ranges": [], "note": "Vintage denim and band tees consistently among the fastest-selling resale categories."},
+  {"style_tag": "athletic", "trend_score": 0.66, "size_ranges": ["m", "l", "xl"], "note": "Retro track jackets and windbreakers trending in mid-to-large sizes."},
+  {"style_tag": "earth tones", "trend_score": 0.60, "size_ranges": [], "note": "Khaki, tan, and brown steadily gaining share as neutrals shift away from all-black."}
+]
