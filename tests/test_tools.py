@@ -16,8 +16,16 @@ network on success.
 from types import SimpleNamespace
 
 import tools
-from tools import search_listings, suggest_outfit, create_fit_card
+from tools import (
+    search_listings,
+    suggest_outfit,
+    create_fit_card,
+    estimate_fair_price,
+    get_trending_styles,
+)
 from utils.data_loader import get_example_wardrobe, get_empty_wardrobe
+import agent
+import style_memory
 
 
 # -- fakes for the Groq client ----------------------------------------------------
@@ -137,3 +145,113 @@ def test_create_fit_card_llm_failure_returns_fallback_not_exception(monkeypatch)
     assert isinstance(result, str)
     assert result.strip() != ""
     assert item["platform"] in result
+
+
+# -- Tool 4 (stretch): estimate_fair_price -------------------------------------------
+
+def test_estimate_fair_price_returns_verdict_with_reasoning():
+    item = search_listings("vintage graphic tee", size=None, max_price=50)[0]
+    result = estimate_fair_price(item)
+    assert isinstance(result, str)
+    assert "$" in result
+    assert "comparable" in result.lower()
+
+
+def test_estimate_fair_price_insufficient_comparables_returns_message_not_exception():
+    lonely_item = {
+        "id": "zzz_unique",
+        "title": "One-of-a-kind item",
+        "description": "nothing else like it",
+        "category": "nonexistent-category",
+        "style_tags": ["nonexistent-tag"],
+        "size": "M",
+        "condition": "good",
+        "price": 40.0,
+        "colors": [],
+        "brand": None,
+        "platform": "depop",
+    }
+    result = estimate_fair_price(lonely_item)
+    assert isinstance(result, str)
+    assert "not enough" in result.lower()
+
+
+# -- Tool 5 (stretch): get_trending_styles -------------------------------------------
+
+def test_get_trending_styles_returns_sorted_list():
+    trends = get_trending_styles(size=None)
+    assert isinstance(trends, list)
+    assert len(trends) > 0
+    scores = [t["trend_score"] for t in trends]
+    assert scores == sorted(scores, reverse=True)
+
+
+def test_get_trending_styles_filters_by_size_without_raising():
+    trends = get_trending_styles(size="xl")
+    assert isinstance(trends, list)  # never raises, even if the list is short
+
+
+def test_suggest_outfit_uses_trending_styles_when_provided(monkeypatch):
+    captured_prompts = []
+
+    def _capturing_factory():
+        class _Client:
+            class chat:
+                class completions:
+                    @staticmethod
+                    def create(**kwargs):
+                        captured_prompts.append(kwargs["messages"][0]["content"])
+                        return _FakeResponse("styled suggestion")
+        return _Client()
+
+    monkeypatch.setattr(tools, "_get_groq_client", _capturing_factory)
+    item = search_listings("vintage graphic tee", size=None, max_price=50)[0]
+    trends = [{"style_tag": "y2k", "trend_score": 0.9, "note": "trending hard"}]
+    suggest_outfit(item, get_example_wardrobe(), trending_styles=trends)
+    assert any("y2k" in p.lower() for p in captured_prompts)
+
+
+# -- Retry Logic with Fallback (stretch) ---------------------------------------------
+
+def test_run_agent_retries_with_size_dropped_when_size_has_no_matches():
+    # "XL" matches no vintage graphic tees in the dataset, but dropping the
+    # size filter should surface results and record the adjustment.
+    session = agent.run_agent(
+        query="vintage graphic tee under $30, size XL",
+        wardrobe=get_example_wardrobe(),
+    )
+    assert session["error"] is None
+    assert "removing the size filter" in session["adjustments"]
+    assert session["selected_item"] is not None
+
+
+def test_run_agent_still_errors_when_no_retry_rung_finds_anything():
+    session = agent.run_agent(
+        query="designer ballgown size XXS under $5",
+        wardrobe=get_example_wardrobe(),
+    )
+    assert session["error"] is not None
+    assert session["fit_card"] is None
+
+
+# -- Style Profile Memory (stretch) --------------------------------------------------
+
+def test_style_profile_round_trip(tmp_path, monkeypatch):
+    fake_path = tmp_path / "style_profile.json"
+    monkeypatch.setattr(style_memory, "_PROFILE_PATH", str(fake_path))
+
+    assert style_memory.load_style_profile() is None
+
+    wardrobe = get_example_wardrobe()
+    style_memory.save_style_profile(wardrobe)
+
+    loaded = style_memory.load_style_profile()
+    assert loaded == wardrobe
+
+
+def test_style_profile_does_not_save_empty_wardrobe(tmp_path, monkeypatch):
+    fake_path = tmp_path / "style_profile.json"
+    monkeypatch.setattr(style_memory, "_PROFILE_PATH", str(fake_path))
+
+    style_memory.save_style_profile(get_empty_wardrobe())
+    assert style_memory.load_style_profile() is None
