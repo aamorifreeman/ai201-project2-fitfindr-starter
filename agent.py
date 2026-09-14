@@ -18,7 +18,13 @@ Usage:
 
 import re
 
-from tools import search_listings, suggest_outfit, create_fit_card
+from tools import (
+    search_listings,
+    suggest_outfit,
+    create_fit_card,
+    estimate_fair_price,
+    get_trending_styles,
+)
 
 
 # -- query parsing ---------------------------------------------------------------
@@ -77,8 +83,11 @@ def _new_session(query: str, wardrobe: dict) -> dict:
         "query": query,              # original user query
         "parsed": {},                # extracted description / size / max_price
         "search_results": [],        # list of matching listing dicts
+        "adjustments": [],           # filters loosened by the retry ladder (stretch)
         "selected_item": None,       # top result, passed into suggest_outfit
         "wardrobe": wardrobe,        # user's wardrobe dict
+        "price_assessment": None,    # string returned by estimate_fair_price (stretch)
+        "trending_styles": [],       # list returned by get_trending_styles (stretch)
         "outfit_suggestion": None,   # string returned by suggest_outfit
         "fit_card": None,            # string returned by create_fit_card
         "error": None,               # set if the interaction ended early
@@ -107,45 +116,74 @@ def run_agent(query: str, wardrobe: dict) -> dict:
 
     # Step 1: parse the query into structured search parameters.
     session["parsed"] = parse_query(query)
+    description = session["parsed"]["description"]
+    size = session["parsed"]["size"]
+    max_price = session["parsed"]["max_price"]
 
     # Step 2: search listings.
     session["search_results"] = search_listings(
-        description=session["parsed"]["description"],
-        size=session["parsed"]["size"],
-        max_price=session["parsed"]["max_price"],
+        description=description, size=size, max_price=max_price
     )
 
-    # Step 3: branch on whether anything matched. This is the adaptive part of
-    # the planning loop -- on no results, we stop here instead of calling the
-    # remaining two tools with empty/garbage input.
+    # Step 3 (stretch -- Retry Logic with Fallback): if nothing matched, retry
+    # with progressively loosened constraints. Each rung only fires if the
+    # previous attempt is still empty.
+    if not session["search_results"] and size is not None:
+        session["search_results"] = search_listings(
+            description=description, size=None, max_price=max_price
+        )
+        if session["search_results"]:
+            session["adjustments"].append("removing the size filter")
+
+    if not session["search_results"] and max_price is not None:
+        session["search_results"] = search_listings(
+            description=description, size=None, max_price=None
+        )
+        if session["search_results"]:
+            session["adjustments"].append("removing the price limit")
+
+    # Step 4: branch on the final result, after every retry rung has been
+    # exhausted. This is the adaptive part of the planning loop -- on no
+    # results, we stop here instead of calling the remaining tools with
+    # empty/garbage input.
     if not session["search_results"]:
-        parsed = session["parsed"]
         filters = []
-        if parsed["size"]:
-            filters.append(f"size {parsed['size']}")
-        if parsed["max_price"] is not None:
-            filters.append(f"under ${parsed['max_price']:.2f}")
+        if size:
+            filters.append(f"size {size}")
+        if max_price is not None:
+            filters.append(f"under ${max_price:.2f}")
         filter_text = f" ({', '.join(filters)})" if filters else ""
+        tried_text = ""
+        if session["adjustments"]:
+            tried_text = f" Already tried {' and '.join(session['adjustments'])}."
         session["error"] = (
-            f"No listings matched \"{parsed['description']}\"{filter_text}. "
+            f"No listings matched \"{description}\"{filter_text}.{tried_text} "
             "Try removing the size filter or raising your price limit."
         )
         return session
 
-    # Step 4: pick the top-ranked match.
+    # Step 5: pick the top-ranked match.
     session["selected_item"] = session["search_results"][0]
 
-    # Step 5: suggest an outfit using the selected item + wardrobe.
+    # Step 6 (stretch tools): price comparison + trend awareness, both using
+    # the selected item / requested size. Neither can fail this loop.
+    session["price_assessment"] = estimate_fair_price(session["selected_item"])
+    session["trending_styles"] = get_trending_styles(size)
+
+    # Step 7: suggest an outfit using the selected item, wardrobe, and any
+    # trending styles relevant to the requested size.
     session["outfit_suggestion"] = suggest_outfit(
-        session["selected_item"], session["wardrobe"]
+        session["selected_item"],
+        session["wardrobe"],
+        trending_styles=session["trending_styles"],
     )
 
-    # Step 6: build the shareable fit card.
+    # Step 8: build the shareable fit card.
     session["fit_card"] = create_fit_card(
         session["outfit_suggestion"], session["selected_item"]
     )
 
-    # Step 7: done.
+    # Step 9: done.
     return session
 
 
@@ -154,7 +192,7 @@ def run_agent(query: str, wardrobe: dict) -> dict:
 if __name__ == "__main__":
     from utils.data_loader import get_example_wardrobe, get_empty_wardrobe
 
-    print("=== Happy path: graphic tee ===\n")
+    print("=== Happy path: graphic tee (+ stretch tools) ===\n")
     session = run_agent(
         query="looking for a vintage graphic tee under $30",
         wardrobe=get_example_wardrobe(),
@@ -163,10 +201,23 @@ if __name__ == "__main__":
         print(f"Error: {session['error']}")
     else:
         print(f"Found: {session['selected_item']['title']}")
+        print(f"\nPrice assessment: {session['price_assessment']}")
+        print(f"\nTrending styles considered: {[t['style_tag'] for t in session['trending_styles']]}")
         print(f"\nOutfit: {session['outfit_suggestion']}")
         print(f"\nFit card: {session['fit_card']}")
 
-    print("\n\n=== No-results path ===\n")
+    print("\n\n=== Retry-with-fallback path: an oddball size ===\n")
+    session_retry = run_agent(
+        query="vintage graphic tee under $30, size XL",
+        wardrobe=get_example_wardrobe(),
+    )
+    if session_retry["error"]:
+        print(f"Error: {session_retry['error']}")
+    else:
+        print(f"Adjustments made: {session_retry['adjustments']}")
+        print(f"Found anyway: {session_retry['selected_item']['title']}")
+
+    print("\n\n=== No-results path (even after retries) ===\n")
     session2 = run_agent(
         query="designer ballgown size XXS under $5",
         wardrobe=get_example_wardrobe(),
