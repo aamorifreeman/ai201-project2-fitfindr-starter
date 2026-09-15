@@ -4,7 +4,7 @@ A multi-tool AI agent that helps you find secondhand pieces and figure out how t
 
 Built for CodePath AI201, Project 2.
 
-**Demo video:** _[add your recorded demo link here before submitting]_
+**Demo video:** [DEMO VIDEO LINK](https://drive.google.com/file/d/1BZnFY1HMdwgI7snNxbB5LFJ7UV88Pk8E/view?usp=sharing)
 
 ---
 
